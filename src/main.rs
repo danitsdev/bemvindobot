@@ -51,6 +51,36 @@ struct PendingJoin {
     occurred_at: DateTime<Utc>,
 }
 
+/// O que fazer com uma entrada detectada no grupo.
+#[derive(Debug, PartialEq, Eq)]
+enum JoinDecision {
+    /// Enviar a figurinha.
+    Welcome,
+    /// Entrada antiga demais (segundos de atraso), provavelmente vinda de uma
+    /// fila liberada após reconexão.
+    TooOld(i64),
+    /// O mesmo aviso já foi tratado.
+    Duplicate,
+}
+
+/// Decide se uma entrada merece figurinha. Fica separada do manipulador de
+/// eventos para poder ser testada sem uma conexão real.
+fn decide_join(join: &PendingJoin, seen: &mut HashSet<String>, now: DateTime<Utc>) -> JoinDecision {
+    let age = now.signed_duration_since(join.occurred_at);
+    if age.num_seconds() > MAX_JOIN_EVENT_AGE_SECS {
+        return JoinDecision::TooOld(age.num_seconds());
+    }
+
+    if let Some(notification_id) = &join.notification_id {
+        let key = format!("{}:{}:{}", join.target, notification_id, join.action_index);
+        if !seen.insert(key) {
+            return JoinDecision::Duplicate;
+        }
+    }
+
+    JoinDecision::Welcome
+}
+
 // O bot só espera por I/O, com picos raros e curtos. Duas threads de trabalho
 // bastam e mantêm o consumo igual numa VM fraca e numa máquina com muitos
 // núcleos (o padrão do tokio criaria uma thread ociosa por núcleo).
@@ -217,32 +247,26 @@ fn register_welcome<B, T, H, R>(
         let seen_notifications = Arc::clone(&seen_notifications);
 
         async move {
-            let Some(PendingJoin {
-                target,
-                notification_id,
-                action_index,
-                occurred_at,
-            }) = pending
-            else {
+            let Some(join) = pending else {
                 return;
             };
 
-            let age = Utc::now().signed_duration_since(occurred_at);
-            if age.num_seconds() > MAX_JOIN_EVENT_AGE_SECS {
-                eprintln!(
-                    "Entrada de {}s atrás ignorada (limite: {MAX_JOIN_EVENT_AGE_SECS}s).",
-                    age.num_seconds()
-                );
-                return;
-            }
-
-            if let Some(notification_id) = notification_id {
-                let key = format!("{target}:{notification_id}:{action_index}");
-                let is_new = seen_notifications.lock().await.insert(key);
-                if !is_new {
+            let decision = {
+                let mut seen = seen_notifications.lock().await;
+                decide_join(&join, &mut seen, Utc::now())
+            };
+            match decision {
+                JoinDecision::Welcome => {}
+                JoinDecision::TooOld(seconds) => {
+                    eprintln!(
+                        "Entrada de {seconds}s atrás ignorada (limite: {MAX_JOIN_EVENT_AGE_SECS}s)."
+                    );
                     return;
                 }
+                JoinDecision::Duplicate => return,
             }
+
+            let target = join.target;
 
             tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -306,12 +330,26 @@ fn load_sticker(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     Ok(bytes)
 }
 
+/// Detecta se o WebP é animado lendo o cabeçalho de verdade: o bit de animação
+/// (0x02) do bloco `VP8X`. WebP simples (`VP8 `/`VP8L`) não tem `VP8X` e é
+/// sempre estático.
 fn looks_animated_webp(bytes: &[u8]) -> bool {
-    bytes
-        .windows(4)
-        .any(|chunk| chunk == b"ANIM" || chunk == b"ANMF")
+    // Formato RIFF: "RIFF" + tamanho + "WEBP", depois blocos de 4 bytes de
+    // nome, 4 de tamanho (little-endian) e os dados, com preenchimento par.
+    let mut offset = 12;
+    while offset + 8 <= bytes.len() {
+        let name = &bytes[offset..offset + 4];
+        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        let data = offset + 8;
+        if name == b"VP8X" {
+            return bytes.get(data).is_some_and(|flags| flags & 0x02 != 0);
+        }
+        offset = data + size + (size & 1);
+    }
+    false
 }
 
+/// Monta a mensagem de figurinha com os dados devolvidos pelo upload no CDN.
 fn build_sticker_message(upload: UploadResponse, is_animated: bool) -> wa::Message {
     wa::Message {
         sticker_message: MessageField::some(wa::message::StickerMessage {
@@ -351,14 +389,34 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Monta um WebP mínimo: cabeçalho `RIFF`/`WEBP` válido, o `marcador`
-    /// informado (ex.: `ANIM`/`ANMF` ou `VP8 `) e preenchimento até `tamanho`.
+    /// WebP mínimo: cabeçalho `RIFF`/`WEBP` válido, o bloco `nome` no começo e
+    /// preenchimento até `tamanho`.
     fn webp(marcador: &[u8], tamanho: usize) -> Vec<u8> {
+        let mut bytes = webp_com_bloco(marcador, &[]);
+        bytes.resize(tamanho.max(bytes.len()), 0);
+        bytes
+    }
+
+    /// WebP com um bloco RIFF no começo: nome + tamanho (LE) + dados, com
+    /// preenchimento par quando os dados têm tamanho ímpar.
+    fn webp_com_bloco(nome: &[u8], dados: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIFF");
         bytes.extend_from_slice(&[0u8; 4]);
         bytes.extend_from_slice(b"WEBP");
-        bytes.extend_from_slice(marcador);
+        bytes.extend_from_slice(nome);
+        bytes.extend_from_slice(&(dados.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(dados);
+        if !dados.len().is_multiple_of(2) {
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    /// WebP animado: bloco `VP8X` com o bit de animação (0x02) ligado,
+    /// preenchido até `tamanho`.
+    fn webp_animado(tamanho: usize) -> Vec<u8> {
+        let mut bytes = webp_com_bloco(b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         bytes.resize(tamanho.max(bytes.len()), 0);
         bytes
     }
@@ -391,14 +449,17 @@ mod tests {
     }
 
     #[test]
-    fn looks_animated_webp_reconhece_anim_e_anmf() {
-        assert!(looks_animated_webp(&webp(b"ANIM", 64)));
-        assert!(looks_animated_webp(&webp(b"ANMF", 64)));
+    fn looks_animated_webp_le_bit_do_vp8x() {
+        assert!(looks_animated_webp(&webp_animado(64)));
+        let estatico = webp_com_bloco(b"VP8X", &[0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!looks_animated_webp(&estatico));
     }
 
     #[test]
-    fn looks_animated_webp_ignora_webp_estatico() {
+    fn looks_animated_webp_ignora_webp_simples() {
+        // WebP simples (VP8 / VP8L) não tem bloco VP8X: é sempre estático.
         assert!(!looks_animated_webp(&webp(b"VP8 ", 64)));
+        assert!(!looks_animated_webp(&webp(b"VP8L", 64)));
         assert!(!looks_animated_webp(b"RIFF....WEBP"));
         assert!(!looks_animated_webp(&[]));
     }
@@ -409,6 +470,12 @@ mod tests {
         let arquivo = arquivo_temporario("estatico", &conteudo);
         let lido = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap();
         assert_eq!(lido, conteudo);
+    }
+
+    #[test]
+    fn load_sticker_aceita_a_figurinha_padrao_do_repositorio() {
+        // Garante que o arquivo enviado junto com o projeto passa na validação.
+        assert!(load_sticker("stickers/bem-vindo.webp").is_ok());
     }
 
     #[test]
@@ -428,7 +495,7 @@ mod tests {
     #[test]
     fn load_sticker_permite_animado_acima_do_limite_estatico() {
         // Acima do limite estático, mas ainda dentro do limite animado.
-        let conteudo = webp(b"ANIM", MAX_STATIC_STICKER_BYTES + 1);
+        let conteudo = webp_animado(MAX_STATIC_STICKER_BYTES + 1);
         let arquivo = arquivo_temporario("animado-ok", &conteudo);
         assert!(load_sticker(arquivo.caminho.to_str().unwrap()).is_ok());
     }
@@ -443,10 +510,81 @@ mod tests {
 
     #[test]
     fn load_sticker_rejeita_animado_acima_do_limite() {
-        let conteudo = webp(b"ANIM", MAX_ANIMATED_STICKER_BYTES + 1);
+        let conteudo = webp_animado(MAX_ANIMATED_STICKER_BYTES + 1);
         let arquivo = arquivo_temporario("animado-grande", &conteudo);
         let erro = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap_err();
         assert!(erro.to_string().contains("500 KiB"));
+    }
+
+    /// Entrada de teste com os campos que importam para a decisão.
+    fn entrada(
+        notification_id: Option<&str>,
+        atraso_segundos: i64,
+        action_index: u32,
+    ) -> PendingJoin {
+        PendingJoin {
+            target: Jid::group("123"),
+            notification_id: notification_id.map(str::to_owned),
+            action_index,
+            occurred_at: Utc::now() - whatsapp_rust::chrono::Duration::seconds(atraso_segundos),
+        }
+    }
+
+    #[test]
+    fn decide_join_aceita_entrada_recente_e_inedita() {
+        let mut seen = HashSet::new();
+        let join = entrada(Some("aviso-1"), 5, 0);
+        assert_eq!(
+            decide_join(&join, &mut seen, Utc::now()),
+            JoinDecision::Welcome
+        );
+    }
+
+    #[test]
+    fn decide_join_ignora_entrada_antiga() {
+        let mut seen = HashSet::new();
+        let join = entrada(Some("aviso-1"), MAX_JOIN_EVENT_AGE_SECS + 10, 0);
+        assert!(matches!(
+            decide_join(&join, &mut seen, Utc::now()),
+            JoinDecision::TooOld(_)
+        ));
+    }
+
+    #[test]
+    fn decide_join_ignora_aviso_repetido() {
+        let mut seen = HashSet::new();
+        let agora = Utc::now();
+        let join = entrada(Some("aviso-1"), 5, 0);
+        assert_eq!(decide_join(&join, &mut seen, agora), JoinDecision::Welcome);
+        assert_eq!(
+            decide_join(&join, &mut seen, agora),
+            JoinDecision::Duplicate
+        );
+    }
+
+    #[test]
+    fn decide_join_trata_mesmo_aviso_com_acoes_diferentes_como_entradas_distintas() {
+        let mut seen = HashSet::new();
+        let agora = Utc::now();
+        let primeira = entrada(Some("aviso-1"), 5, 0);
+        let segunda = entrada(Some("aviso-1"), 5, 1);
+        assert_eq!(
+            decide_join(&primeira, &mut seen, agora),
+            JoinDecision::Welcome
+        );
+        assert_eq!(
+            decide_join(&segunda, &mut seen, agora),
+            JoinDecision::Welcome
+        );
+    }
+
+    #[test]
+    fn decide_join_sem_identificador_nunca_e_repetido() {
+        let mut seen = HashSet::new();
+        let agora = Utc::now();
+        let join = entrada(None, 5, 0);
+        assert_eq!(decide_join(&join, &mut seen, agora), JoinDecision::Welcome);
+        assert_eq!(decide_join(&join, &mut seen, agora), JoinDecision::Welcome);
     }
 
     #[test]
