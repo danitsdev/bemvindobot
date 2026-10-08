@@ -41,6 +41,7 @@ fn default_sticker_path() -> String {
 }
 
 /// Argumentos aceitos na linha de comando.
+#[derive(Debug)]
 struct Args {
     discover: bool,
 }
@@ -122,13 +123,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Interpreta os argumentos. Devolve `None` quando só a ajuda foi pedida, o
-/// que significa que o programa deve encerrar sem fazer mais nada.
+/// Interpreta os argumentos da linha de comando. Devolve `None` quando só a
+/// ajuda foi pedida, o que significa que o programa deve encerrar sem fazer
+/// mais nada.
 fn parse_args() -> Result<Option<Args>, Box<dyn std::error::Error>> {
-    let mut args = Args { discover: false };
-    for arg in std::env::args().skip(1) {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Núcleo de [`parse_args`], separado para poder ser testado com argumentos
+/// controlados sem mexer no ambiente do processo.
+fn parse_args_from<I>(args: I) -> Result<Option<Args>, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut parsed = Args { discover: false };
+    for arg in args {
         match arg.as_str() {
-            "--discover" => args.discover = true,
+            "--discover" => parsed.discover = true,
             "-h" | "--help" => {
                 print_usage();
                 return Ok(None);
@@ -136,7 +147,7 @@ fn parse_args() -> Result<Option<Args>, Box<dyn std::error::Error>> {
             _ => return Err(format!("Opção desconhecida: {arg}. Use --help.").into()),
         }
     }
-    Ok(Some(args))
+    Ok(Some(parsed))
 }
 
 fn print_usage() {
@@ -341,4 +352,133 @@ fn restrict_permissions(path: &str, mode: u32) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &str, _mode: u32) -> std::io::Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Monta um WebP mínimo: cabeçalho `RIFF`/`WEBP` válido, o `marcador`
+    /// informado (ex.: `ANIM`/`ANMF` ou `VP8 `) e preenchimento até `tamanho`.
+    fn webp(marcador: &[u8], tamanho: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(b"WEBP");
+        bytes.extend_from_slice(marcador);
+        bytes.resize(tamanho.max(bytes.len()), 0);
+        bytes
+    }
+
+    /// Arquivo temporário removido automaticamente ao sair do escopo.
+    struct ArquivoTemporario {
+        caminho: PathBuf,
+    }
+
+    impl Drop for ArquivoTemporario {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.caminho);
+        }
+    }
+
+    fn arquivo_temporario(nome: &str, conteudo: &[u8]) -> ArquivoTemporario {
+        static CONTADOR: AtomicU64 = AtomicU64::new(0);
+        let id = CONTADOR.fetch_add(1, Ordering::Relaxed);
+        let caminho = std::env::temp_dir().join(format!(
+            "bemvindobot-{}-{nome}-{id}.webp",
+            std::process::id()
+        ));
+        fs::write(&caminho, conteudo).expect("escrever arquivo temporário");
+        ArquivoTemporario { caminho }
+    }
+
+    /// Atalho para testar [`parse_args_from`] com uma lista fixa de argumentos.
+    fn parse_args_de(args: &[&str]) -> Result<Option<Args>, Box<dyn std::error::Error>> {
+        parse_args_from(args.iter().map(|arg| (*arg).to_owned()))
+    }
+
+    #[test]
+    fn looks_animated_webp_reconhece_anim_e_anmf() {
+        assert!(looks_animated_webp(&webp(b"ANIM", 64)));
+        assert!(looks_animated_webp(&webp(b"ANMF", 64)));
+    }
+
+    #[test]
+    fn looks_animated_webp_ignora_webp_estatico() {
+        assert!(!looks_animated_webp(&webp(b"VP8 ", 64)));
+        assert!(!looks_animated_webp(b"RIFF....WEBP"));
+        assert!(!looks_animated_webp(&[]));
+    }
+
+    #[test]
+    fn load_sticker_aceita_webp_dentro_do_limite() {
+        let conteudo = webp(b"VP8 ", 64);
+        let arquivo = arquivo_temporario("estatico", &conteudo);
+        let lido = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap();
+        assert_eq!(lido, conteudo);
+    }
+
+    #[test]
+    fn load_sticker_rejeita_arquivo_que_nao_e_webp() {
+        let arquivo = arquivo_temporario("invalido", b"isto nao e um webp");
+        let erro = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap_err();
+        assert!(erro.to_string().contains("WebP"));
+    }
+
+    #[test]
+    fn load_sticker_rejeita_arquivo_curto_demais() {
+        let arquivo = arquivo_temporario("curto", b"RIFF");
+        let erro = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap_err();
+        assert!(erro.to_string().contains("WebP"));
+    }
+
+    #[test]
+    fn load_sticker_permite_animado_acima_do_limite_estatico() {
+        // Acima do limite estático, mas ainda dentro do limite animado.
+        let conteudo = webp(b"ANIM", MAX_STATIC_STICKER_BYTES + 1);
+        let arquivo = arquivo_temporario("animado-ok", &conteudo);
+        assert!(load_sticker(arquivo.caminho.to_str().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn load_sticker_rejeita_estatico_acima_do_limite() {
+        let conteudo = webp(b"VP8 ", MAX_STATIC_STICKER_BYTES + 1);
+        let arquivo = arquivo_temporario("estatico-grande", &conteudo);
+        let erro = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap_err();
+        assert!(erro.to_string().contains("100 KiB"));
+    }
+
+    #[test]
+    fn load_sticker_rejeita_animado_acima_do_limite() {
+        let conteudo = webp(b"ANIM", MAX_ANIMATED_STICKER_BYTES + 1);
+        let arquivo = arquivo_temporario("animado-grande", &conteudo);
+        let erro = load_sticker(arquivo.caminho.to_str().unwrap()).unwrap_err();
+        assert!(erro.to_string().contains("500 KiB"));
+    }
+
+    #[test]
+    fn parse_args_sem_argumentos_usa_padrao() {
+        let args = parse_args_de(&[]).unwrap().unwrap();
+        assert!(!args.discover);
+    }
+
+    #[test]
+    fn parse_args_reconhece_discover() {
+        let args = parse_args_de(&["--discover"]).unwrap().unwrap();
+        assert!(args.discover);
+    }
+
+    #[test]
+    fn parse_args_ajuda_encerra_sem_configurar() {
+        assert!(parse_args_de(&["-h"]).unwrap().is_none());
+        assert!(parse_args_de(&["--help"]).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_args_rejeita_opcao_desconhecida() {
+        let erro = parse_args_de(&["--bogus"]).unwrap_err();
+        assert!(erro.to_string().contains("--bogus"));
+    }
 }
