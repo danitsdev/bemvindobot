@@ -51,7 +51,10 @@ struct PendingJoin {
     occurred_at: DateTime<Utc>,
 }
 
-#[tokio::main]
+// O bot só espera por I/O, com picos raros e curtos. Duas threads de trabalho
+// bastam e mantêm o consumo igual numa VM fraca e numa máquina com muitos
+// núcleos (o padrão do tokio criaria uma thread ociosa por núcleo).
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(args) = parse_args()? else {
         return Ok(());

@@ -19,3 +19,8 @@ whatsapp-rust = { version = "=0.7.0", default-features = false, features = [
     "tokio-native",
     "signal",
 ] }
+
+[profile.release]
+# Sem símbolos no binário: arquivo bem menor para instalar e manter em
+# dispositivos fracos (Termux, VPS pequena). Não muda a execução.
+strip = true
