@@ -1,20 +1,14 @@
 # BemVindoBot
 
-Bot local em Rust que observa a entrada de pessoas em um grupo do WhatsApp e envia uma figurinha `.webp` de boas-vindas.
+Bot local em Rust que envia uma figurinha `.webp` de boas-vindas quando alguém entra em um grupo do WhatsApp.
 
-O cliente usado é o [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust), uma implementação não oficial do protocolo WhatsApp Web. O pareamento é feito como aparelho conectado por QR. Este projeto não é afiliado à Meta ou ao WhatsApp. O uso de clientes não oficiais pode contrariar os termos da Meta e resultar em suspensão da conta.
+Usa o [`whatsapp-rust`](https://github.com/oxidezap/whatsapp-rust), cliente não oficial do protocolo WhatsApp Web, com pareamento por QR. Sem vínculo com a Meta. Clientes não oficiais podem contrariar os termos do WhatsApp e levar à suspensão da conta.
 
 ## Preparar
 
-Requisitos: Rust 1.94 ou mais recente e um compilador C (`cc`/`clang`), usado para compilar o SQLite embutido e o provedor TLS (ring). Não são necessárias bibliotecas de sistema de SQLite nem de OpenSSL.
+Requisitos: Rust 1.94 ou mais recente e um compilador C (`cc`/`clang`), usado para compilar o SQLite embutido e o TLS (ring). Não são necessários SQLite nem OpenSSL do sistema.
 
-```sh
-cargo run
-```
-
-Na primeira execução, o programa cria `bot.json`. O repositório inclui a figurinha `stickers/bem-vindo.webp`; para usar outra, substitua esse arquivo ou altere `sticker_path` para apontar para um WebP local.
-
-Configure o JID do grupo em `bot.json`:
+Na primeira execução o programa cria `bot.json`:
 
 ```json
 {
@@ -23,17 +17,17 @@ Configure o JID do grupo em `bot.json`:
 }
 ```
 
-Use um arquivo WebP quadrado de 512 × 512. O programa aceita até 100 KiB para figurinha estática e até 500 KiB para animada. Figurinhas favoritas que estão apenas dentro do WhatsApp não são lidas automaticamente; coloque no caminho configurado uma cópia `.webp` da figurinha escolhida.
+Aponte `group_jid` para o JID do seu grupo e `sticker_path` para o WebP desejado: quadrado, 512 × 512, até 100 KiB estático ou 500 KiB animado. O repositório já inclui `stickers/bem-vindo.webp`.
+
+Figurinha salva dentro do WhatsApp não é lida automaticamente. Exporte uma cópia `.webp` e use esse arquivo.
 
 ## Descobrir o JID do grupo
-
-Para ver as opções disponíveis, rode `cargo run -- --help`. Rode em modo de descoberta e escaneie o QR se ainda não pareou este bot:
 
 ```sh
 cargo run -- --discover
 ```
 
-Envie `!grupo-id` no grupo desejado. O JID aparecerá no terminal; copie para `group_jid` em `bot.json`, encerre com Ctrl+C e rode `cargo run` novamente. O modo de descoberta não envia mensagens nem figurinhas.
+Envie `!grupo-id` no grupo. O JID aparece no terminal; copie para `group_jid` e reinicie. O modo descoberta não envia nada. Veja todas as opções com `cargo run -- --help`.
 
 ## Executar
 
@@ -41,17 +35,17 @@ Envie `!grupo-id` no grupo desejado. O JID aparecerá no terminal; copie para `g
 cargo run
 ```
 
-Escaneie o QR com o WhatsApp em **Aparelhos conectados → Conectar aparelho**. Depois disso, a sessão fica em `state/whatsapp.db` e o QR não será necessário nas próximas execuções. Para encerrar, use Ctrl+C.
+Escaneie o QR em **Aparelhos conectados > Conectar aparelho**. Depois disso a sessão fica em `state/whatsapp.db` e o QR não é mais pedido. Encerre com Ctrl+C.
 
-O tratamento do bot recebe somente eventos de alteração de grupo e compara o JID antes de agir. Quando chega uma ação de entrada (`add`) no grupo configurado, aguarda 500 ms e envia a figurinha. Entradas registradas há mais de 60 segundos são ignoradas: se o bot ficou offline e várias pessoas entraram nesse período, ele não envia uma rajada de figurinhas atrasadas ao reconectar. Quedas de rede são reconectadas automaticamente pelo cliente, com backoff progressivo. No Linux, o diretório da sessão usa permissão privada.
+O bot só reage a alterações de grupo no JID configurado. Ao detectar uma entrada, espera 500 ms e envia a figurinha. Entradas com mais de 60 segundos são ignoradas, para não disparar uma rajada de figurinhas atrasadas depois de uma queda. Quedas de rede são reconectadas automaticamente. No Linux a sessão fica com permissão privada.
 
-## Rodar em background (PC, VPS, Docker, Termux)
+## Rodar em background
 
-Depois de pareado, o bot não mostra mais o QR nem precisa de terminal: ele fica em silêncio observando o grupo até ser encerrado. A sessão fica em `state/whatsapp.db`, então rodar a partir da mesma pasta reaproveita o pareamento já existente — não é preciso escanear o QR de novo.
+Depois de pareado o bot roda em silêncio, sem QR e sem terminal, observando o grupo até ser encerrado. Como a sessão fica em `state/whatsapp.db`, iniciar a partir da mesma pasta reaproveita o pareamento.
 
-**Rode uma única instância por sessão.** Dois processos usando o mesmo `state/whatsapp.db` abrem duas conexões como o mesmo aparelho e uma sobrescreve a outra. Encerre o processo antigo antes de subir o novo, ou copie `state/` para um diretório separado.
+Rode **uma única instância** por sessão. Dois processos no mesmo `state/whatsapp.db` abrem duas conexões como o mesmo aparelho e uma sobrescreve a outra.
 
-O bot trata `SIGINT` (Ctrl+C) e `SIGTERM` (`systemctl stop`, `docker stop`) encerrando e salvando a sessão — não precisa de `kill -9`.
+O bot encerra e salva a sessão em `SIGINT` (Ctrl+C) e `SIGTERM` (`systemctl stop`, `docker stop`), então não precisa de `kill -9`.
 
 ### systemd (VPS)
 
@@ -74,24 +68,24 @@ WantedBy=multi-user.target
 
 ```sh
 sudo systemctl enable --now bemvindobot
-journalctl -u bemvindobot -f   # acompanhar os logs
+journalctl -u bemvindobot -f
 ```
 
 ### Docker
 
-Imagem com o binário compilado (`cargo build --release`) e `state/`/`bot.json` montados como volume; `docker stop` já envia `SIGTERM`.
+Monte `bot.json` e `state/` como volumes numa imagem com o binário de `cargo build --release`. O `docker stop` já envia `SIGTERM`.
 
 ### Termux (Android)
 
 ```sh
 pkg install rust clang
 cargo build --release
-termux-wake-lock                      # evita que o Android suspenda o processo
+termux-wake-lock
 nohup target/release/bemvindobot > bot.log 2>&1 &
 ```
 
-Alternativamente, rode dentro de `tmux`. Se você já pareou em outra máquina, copie a pasta `state/` junto com o `bot.json` para não parear de novo.
+Também funciona dentro de `tmux`. Para reaproveitar o pareamento de outra máquina, copie a pasta `state/` junto com o `bot.json`.
 
 ## Dados locais
 
-`bot.json` contém a configuração do grupo e `state/` contém a sessão pareada do WhatsApp. Esses caminhos são ignorados pelo Git. Não compartilhe nem publique a pasta `state/`: ela permite reutilizar a sessão do aparelho conectado.
+`bot.json` guarda a configuração do grupo e `state/` a sessão pareada. Ambos são ignorados pelo Git. Não compartilhe nem publique `state/`: ele permite reutilizar a sessão do aparelho conectado.

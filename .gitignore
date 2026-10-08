@@ -4,9 +4,4 @@
 /stickers/**
 !/stickers/bem-vindo.webp
 
-.env
-.env.*
-!.env.example
-.DS_Store
 *.log
-*.swp

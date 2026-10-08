@@ -21,7 +21,5 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Lint
         run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Compile
-        run: cargo check --locked
       - name: Test
         run: cargo test --locked

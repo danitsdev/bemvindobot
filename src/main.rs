@@ -1,5 +1,3 @@
-#![recursion_limit = "512"]
-
 //! Bot que envia uma figurinha de boas-vindas quando alguém entra em um grupo
 //! do WhatsApp, usando o cliente não oficial `whatsapp-rust`.
 
@@ -40,15 +38,13 @@ fn default_sticker_path() -> String {
     "stickers/bem-vindo.webp".to_owned()
 }
 
-/// Argumentos aceitos na linha de comando.
 #[derive(Debug)]
 struct Args {
     discover: bool,
 }
 
-/// Entrada no grupo que ainda vai virar uma figurinha de boas-vindas.
+/// Entrada no grupo que vai virar uma figurinha de boas-vindas.
 struct PendingJoin {
-    /// Grupo que recebe a figurinha.
     target: Jid,
     notification_id: Option<String>,
     action_index: u32,
@@ -68,12 +64,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     fs::create_dir_all("state")?;
     restrict_permissions("state", 0o700)?;
-
-    let sticker_bytes = if args.discover {
-        None
-    } else {
-        Some(load_sticker(&config.sticker_path)?)
-    };
 
     let store = SqliteStore::new(DATABASE_PATH).await?;
     restrict_permissions(DATABASE_PATH, 0o600)?;
@@ -101,7 +91,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = if args.discover {
         register_discovery(builder)
     } else {
-        let sticker_bytes = sticker_bytes.expect("a figurinha foi carregada");
+        let sticker_bytes = load_sticker(&config.sticker_path)?;
         register_welcome(builder, &config, sticker_bytes)
     };
 
@@ -115,7 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // por `systemctl stop` e `docker stop`. Sem isso, um supervisor mata o
         // processo sem deixar a sessão ser salva.
         _ = shutdown_signal() => {
-            eprintln!("Encerrando e salvando a sessão…");
+            eprintln!("Encerrando e salvando a sessão...");
             handle.shutdown().await;
         }
     }
@@ -123,15 +113,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Interpreta os argumentos da linha de comando. Devolve `None` quando só a
-/// ajuda foi pedida, o que significa que o programa deve encerrar sem fazer
-/// mais nada.
+/// Lê os argumentos da linha de comando. Devolve `None` quando a ajuda foi
+/// pedida, indicando que o programa deve apenas encerrar.
 fn parse_args() -> Result<Option<Args>, Box<dyn std::error::Error>> {
     parse_args_from(std::env::args().skip(1))
 }
 
-/// Núcleo de [`parse_args`], separado para poder ser testado com argumentos
-/// controlados sem mexer no ambiente do processo.
+/// Núcleo de [`parse_args`], separado para testes (não lê `std::env`).
 fn parse_args_from<I>(args: I) -> Result<Option<Args>, Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = String>,
@@ -151,7 +139,7 @@ where
 }
 
 fn print_usage() {
-    println!("BemVindoBot — envia uma figurinha quando alguém entra no grupo.");
+    println!("BemVindoBot: envia uma figurinha quando alguém entra no grupo.");
     println!();
     println!("Uso: bemvindobot [--discover]");
     println!();
