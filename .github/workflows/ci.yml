@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Compile
+        run: cargo check --locked
+      - name: Test
+        run: cargo test --locked

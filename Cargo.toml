@@ -1,0 +1,21 @@
+[package]
+name = "bemvindobot"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Bot local que envia uma figurinha quando alguém entra em um grupo do WhatsApp"
+license = "MIT"
+
+[dependencies]
+qrcode = { version = "0.14.1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+whatsapp-rust = { version = "=0.7.0", default-features = false, features = [
+    "sqlite-storage",
+    "tokio-transport",
+    "tokio-runtime",
+    "ureq-client",
+    "tokio-native",
+    "signal",
+] }
